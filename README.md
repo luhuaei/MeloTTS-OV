@@ -89,6 +89,7 @@ pip install -r requirements.txt
 pip install openvino nncf
 python setup.py develop # or  pip install -e .
 python -m unidic download
+python -m nltk.downloader averaged_perceptron_tagger_eng
 pip install deepfilternet #optional for enhancing speech
 ```
 
