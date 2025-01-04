@@ -26,6 +26,8 @@ from torch.utils.data import DataLoader
 import nncf
 import nltk
 
+use_threads = 8
+
 class ExportModel(PreTrainedModel):
     def __init__(self, base_model, config):
         super().__init__(config)
@@ -424,9 +426,9 @@ class TTS(nn.Module):
         print(f"ov_path : {ov_model_path}")
         self.tts_model = self.core.read_model(Path(ov_model_path))
         self.tts_compiled_model = self.core.compile_model(self.tts_model, self.tts_device)
-        self.tts_request = self.tts_compiled_model.create_infer_request()
+        self.tts_request = [self.tts_compiled_model.create_infer_request() for i in range(0, use_threads)]
 
-    def ov_infer(self, x_tst=None, x_tst_lengths=None, speakers=None, tones=None, lang_ids=None, bert=None, ja_bert=None, sdp_ratio=0.2, noise_scale=0.6, noise_scale_w=0.8, speed=1.0):
+    def ov_infer(self, x_tst=None, x_tst_lengths=None, speakers=None, tones=None, lang_ids=None, bert=None, ja_bert=None, sdp_ratio=0.2, noise_scale=0.6, noise_scale_w=0.8, speed=1.0, index=0):
             inputs_dict = {}
             inputs_dict['phones'] = x_tst
             inputs_dict['phones_length'] = x_tst_lengths
@@ -440,11 +442,13 @@ class TTS(nn.Module):
             inputs_dict['noise_scale_w'] = torch.tensor([noise_scale_w])
             inputs_dict['sdp_ratio'] = torch.tensor([sdp_ratio])
 
-            self.tts_request.start_async(inputs_dict, share_inputs=True)
-            self.tts_request.wait()
-            audio = (self.tts_request.get_tensor("audio").data.copy())[0][0]
+            self.tts_request[index].start_async(inputs_dict, share_inputs=True)
 
-            return audio
+            def done():
+                self.tts_request[index].wait()
+                return (self.tts_request[index].get_tensor("audio").data.copy())[0][0]
+
+            return done
 
     def tts_to_file(self, text, speaker_id, output_path=None, sdp_ratio=0.2, noise_scale=0.6, noise_scale_w=0.8, speed=1.0, pbar=None, format=None, position=None, quiet=False, use_ov=True):
         language = self.language
@@ -459,7 +463,11 @@ class TTS(nn.Module):
                 tx = texts
             else:
                 tx = tqdm(texts)
-        for t in tx:
+
+        doneCallbacks = []
+        for idx, t in enumerate(tx):
+            idx = idx % use_threads
+
             if language in ['EN', 'ZH_MIX_EN']:
                 t = re.sub(r'([a-z])([A-Z])', r'\1 \2', t)
             device = self.device
@@ -475,7 +483,7 @@ class TTS(nn.Module):
                 speakers = torch.LongTensor([speaker_id]).to(device)
 
                 if use_ov:
-                    audio = self.ov_infer(x_tst=x_tst,
+                    audioDone = self.ov_infer(x_tst=x_tst,
                                           x_tst_lengths=x_tst_lengths,
                                           speakers=speakers,
                                           tones=tones,
@@ -485,7 +493,9 @@ class TTS(nn.Module):
                                           sdp_ratio=sdp_ratio,
                                           noise_scale=noise_scale,
                                           noise_scale_w=noise_scale_w,
-                                          speed=speed)
+                                          speed=speed,
+                                          index=idx)
+                    doneCallbacks.append(audioDone)
                 else:
                     audio = self.model(
                             x_tst,
@@ -502,7 +512,12 @@ class TTS(nn.Module):
                         )[0][0, 0].data.cpu().float().numpy()
                 del x_tst, tones, lang_ids, bert, ja_bert, x_tst_lengths, speakers
                 #
-            audio_list.append(utils.fix_loudness(audio,self.hps.data.sampling_rate))
+
+            if len(doneCallbacks) == use_threads or idx == (len(tx)-1):
+                for done in doneCallbacks:
+                    audio = done()
+                    audio_list.append(utils.fix_loudness(audio,self.hps.data.sampling_rate))
+                    doneCallbacks = []
         torch.cuda.empty_cache()
         audio = self.audio_numpy_concat(audio_list, sr=self.hps.data.sampling_rate, speed=speed)
 
