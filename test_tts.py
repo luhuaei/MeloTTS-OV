@@ -7,9 +7,9 @@ speed = 1.0
 
 
 use_ov = True  ## Used to control whether to use torch or openvino
-use_int8 = True
+use_int8 = False
 speech_enhance = True
-lang = "EN" # or ZH
+lang = "ZH" # or ZH
 
 
 # Parse args for ov device
@@ -19,15 +19,12 @@ parser.add_argument("--tts_device", type=str, choices=["CPU", "GPU"], default="C
                     help="Select inference device for TTS: CPU or GPU")
 parser.add_argument("--bert_device", type=str, choices=["CPU", "GPU", "NPU"], default="CPU",
                     help="Select inference device for BERT: CPU GPU or NPU")
-parser.add_argument("--language", type=str, default="EN",
-                    help="Specify the language for the models: ZH or EN")
 
 # Parse command-line arguments
 args = parser.parse_args()
 # ov device
 tts_device = args.tts_device
 bert_device = args.bert_device
-lang = args.language
 
 if speech_enhance:
     from df.enhance import enhance, init_df, load_audio, save_audio
@@ -44,7 +41,7 @@ if speech_enhance:
 
         model, df_state, _ = init_df()
         audio, sr = torchaudio.load(input_file)
-        
+
         # Resample the WAV file to meet the requirements of DeepFilterNet
         resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=new_sample_rate)
         resampled_audio = resampler(audio)
@@ -54,10 +51,9 @@ if speech_enhance:
         # Save the enhanced audio
         save_audio(output_file, enhanced, df_state.sr())
 
-if lang == "ZH":
-    text = "我们探讨如何在 Intel 平台上转换和优化artificial intelligence 模型"
-elif lang == "EN":
-    text = "For Intel platforms, we explore the methods for converting and optimizing models."
+text = '''知名爆料人 Moore’s Law is Dead 在近期的视频中表示，PlayStation 5 Pro 不带光驱的型号价格有望低至 500 美元，因为它的生产成本不会比 PlayStation 5 高出多少。
+
+据 SteamDB 数据显示，截至发稿，《HELLDIVERS 2》Steam 同时在线人数的峰值已经来到了 255189 人，即时玩家人数也超过了 16 万人，预计在本周末热度会进一步上涨。'''
 
 model = TTS(language=lang, tts_device=args.tts_device, bert_device=args.bert_device, use_int8=use_int8)
 speaker_ids = model.hps.data.spk2id
@@ -79,7 +75,7 @@ for i in range(loop_num):
          for speaker in speakers:
             output_path = 'en_pth_{}.wav'.format(str(speaker))
             start = time.perf_counter()
-            model.tts_to_file(text, speaker_ids[speaker], output_path, speed=speed*0.75, use_ov = use_ov)
+            model.tts_to_file(text, speaker_ids[speaker], output_path, speed=speed, use_ov = use_ov)
             end = time.perf_counter()
     else:
         for speaker in speakers:
@@ -89,11 +85,10 @@ for i in range(loop_num):
             if speech_enhance:
                 print("Use speech enhance")
                 process_audio(output_path,output_path)
-            end = time.perf_counter()         
+            end = time.perf_counter()
 
     dur_time = (end - start) * 1000
     dur_time_list.append(dur_time)
 
-if loop_num > 1:
-    avg_lantecy = sum(dur_time_list[1:]) / (len(dur_time_list) - 1)
-    print(f"MeloTTS model e2e avg latency: {avg_lantecy:.2f} ms")
+avg_lantecy = sum(dur_time_list) / (len(dur_time_list))
+print(f"MeloTTS model e2e avg latency: {avg_lantecy:.2f} ms")
