@@ -12,6 +12,7 @@ import librosa
 from melo.text import cleaned_text_to_sequence, get_bert
 from melo.text.cleaner import clean_text
 from melo import commons
+import pyloudnorm as pyln
 
 MATPLOTLIB_FLAG = False
 
@@ -439,3 +440,14 @@ class HParams:
 
     def __repr__(self):
         return self.__dict__.__repr__()
+
+def fix_loudness(input, rate):
+    # 峰值归一化至 -1 dB
+    peak_normalized_audio = pyln.normalize.peak(input, -1.0)
+
+    # 测量响度
+    meter = pyln.Meter(rate)
+    loudness = meter.integrated_loudness(peak_normalized_audio)
+
+    # 响度归一化至 -18 dB LUFS
+    return pyln.normalize.loudness(peak_normalized_audio, loudness, -18.0)

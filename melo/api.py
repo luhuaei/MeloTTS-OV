@@ -24,7 +24,7 @@ import transformers
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 import nncf
-import nltk 
+import nltk
 
 class ExportModel(PreTrainedModel):
     def __init__(self, base_model, config):
@@ -51,8 +51,8 @@ class Bert():
     def __init__(self, use_int8=False, device="CPU"):
         self.use_int8=use_int8
         self.device  = device
-        
-    
+
+
     def save_tokenizer(self, tokenizer, out_dir):
         try:
             tokenizer.save_pretrained(out_dir)
@@ -103,9 +103,9 @@ class Bert():
         models = AutoModelForMaskedLM.from_pretrained(model_id)
         tokenizers = AutoTokenizer.from_pretrained(model_id)
         config = AutoConfig.from_pretrained(model_id)
-        
+
         export_model = ExportModel(models, config)
-        
+
 
         inputs = tokenizers(text, return_tensors="pt")
 
@@ -114,18 +114,18 @@ class Bert():
                 "token_type_ids": inputs['token_type_ids'],
                 "attention_mask": inputs['attention_mask'],
             }
-            
+
         ov_model = ov.convert_model(
             export_model,
             example_input = example_input,
         )
-        
+
         """
         reshape model
         Set the batch size of all input tensors to 1 to facilitate the use of the C++ infer
         If you are only using the Python pipeline, this step can be omitted.
-        """   
-        shapes = {}     
+        """
+        shapes = {}
         for input_layer  in ov_model.inputs:
             shapes[input_layer] = input_layer.partial_shape
             shapes[input_layer][0] = 1
@@ -133,10 +133,10 @@ class Bert():
 
         self.save_tokenizer(tokenizers, Path(ov_path))
         models.config.save_pretrained(Path(ov_path))
-        
+
         ov_model_path = Path(f"{ov_path}/bert_{language}.xml")
         ov.save_model(ov_model, Path(ov_model_path))
-        
+
         if self.use_int8:
             calibration_data = self.prepare_dataset(example_input=example_input)
             calibration_dataset = nncf.Dataset(calibration_data)
@@ -156,7 +156,7 @@ class Bert():
             )
 
             ov.save_model(quantized_model, Path(f"{ov_path}/bert_int8_{language}.xml"))
-        
+
     def ov_bert_model_init(self, ov_path=None, bert_device = "CPU", language = "ZH"):
         core = ov.Core()
         if bert_device != "NPU":
@@ -170,24 +170,24 @@ class Bert():
         self.bert_model = core.read_model(Path(ov_model_path))
         self.bert_compiled_model = core.compile_model(self.bert_model, bert_device)
         self.bert_request = self.bert_compiled_model.create_infer_request()
-                
+
         self.bert_tokenizer = AutoTokenizer.from_pretrained(ov_path, trust_remote_code=True)
         self.bert_config = AutoConfig.from_pretrained(ov_path, trust_remote_code=True)
         print(f"init {ov_model_path}")
-    
-        
+
+
     def ov_bert_infer(self, input_ids=None, token_type_ids=None, attention_mask=None):
         inputs_dict = {}
         inputs_dict['input_ids'] = input_ids
         inputs_dict['token_type_ids'] = token_type_ids
         inputs_dict['attention_mask'] = attention_mask
-        
+
         """
         Reshape model to static:
         If using device NPU (on Meteor Lake) to run the BERT model, it is necessary
         to reshape the model to a static size and pad the input accordingly.
         """
-        def pad_tensor(input_tensor, pad_length=32):      
+        def pad_tensor(input_tensor, pad_length=32):
             pad_size = pad_length - input_tensor.shape[1]
             if pad_size > 0:
                 # Pad with zeros on the right side using torch.nn.functional.pad
@@ -209,7 +209,7 @@ class Bert():
 
         return bert_output
 class TTS(nn.Module):
-    def __init__(self, 
+    def __init__(self,
                 language,
                 torch_device = 'cpu',
                 tts_device='CPU',
@@ -226,7 +226,7 @@ class TTS(nn.Module):
         if 'cuda' in torch_device:
             assert torch.cuda.is_available()
 
-        # config_path = 
+        # config_path =
         hps = load_or_download_config(language, use_hf=use_hf, config_path=config_path)
 
         num_languages = hps.num_languages
@@ -248,24 +248,24 @@ class TTS(nn.Module):
         self.symbol_to_id = {s: i for i, s in enumerate(symbols)}
         self.hps = hps
         self.device = torch_device
-    
+
         # load state_dict
         checkpoint_dict = load_or_download_model(language, torch_device, use_hf=use_hf, ckpt_path=ckpt_path)
         self.model.load_state_dict(checkpoint_dict['model'], strict=True)
-        
+
         language = language.split('_')[0]
         self.language = 'ZH_MIX_EN' if language == 'ZH' else language # we support a ZH_MIX_EN model
         if self.language == "EN":
             nltk.download('averaged_perceptron_tagger_eng')
-        
+
          # ov device
         self.tts_device = tts_device
         self.bert_device = bert_device
 
         self.bert_model = Bert(use_int8=use_int8, device = self.bert_device)
         self.use_int8 =use_int8
-        
-       
+
+
 
 
     @staticmethod
@@ -285,7 +285,7 @@ class TTS(nn.Module):
             print('\n'.join(texts))
             print(" > ===========================")
         return texts
-    
+
     def prepare_calibration_data(self, dataloader, init_steps):
         data = []
         for batch in dataloader:
@@ -296,7 +296,7 @@ class TTS(nn.Module):
                     inputs_dict = {}
                     inputs_dict['phones'] = batch['x'].squeeze(0)
                     inputs_dict['phones_length'] = batch['x_lengths'].squeeze(0)
-                    
+
                     inputs_dict['tones'] = batch['tone'].squeeze(0)
                     inputs_dict['lang_ids'] = batch['language'].squeeze(0)
                     inputs_dict['bert'] = batch['bert'].squeeze(0)
@@ -333,11 +333,11 @@ class TTS(nn.Module):
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, num_workers=0, pin_memory=True)
         calibration_data = self.prepare_calibration_data(dataloader, opt_init_steps)
         return calibration_data
-    
+
     def tts_convert_to_ov(self, ov_path, language = "ZH", sdp_ratio=0.2, noise_scale=0.6, noise_scale_w=0.8, speed=1.0,):
         self.bert_model.bert_convert_to_ov(ov_path, language)
-        
-        
+
+
 
         x_tst = torch.tensor([[  0,   0,   0,  97,   0,  65,   0, 100,   0,  89,   0,  55,   0,  49,
            0, 100,   0,  13,   0,  98,   0,  95,   0,  98,   0,  40,   0,  60,
@@ -371,7 +371,7 @@ class TTS(nn.Module):
                 "noise_scale_w": noise_scale_w,
                 "sdp_ratio": sdp_ratio,
             }
-            
+
         ov_model = ov.convert_model(
             self.model,
             example_input=example_input,
@@ -384,13 +384,13 @@ class TTS(nn.Module):
         outputs_name = ['audio']
         for output, output_name in zip(ov_model.outputs, outputs_name):
             output.get_tensor().set_names({output_name})
-        
+
         """
         reshape model
         Set the batch size of all input tensors to 1 to facilitate the use of the C++ infer
         If you are only using the Python pipeline, this step can be omitted.
-        """   
-        shapes = {}     
+        """
+        shapes = {}
         for input_layer  in ov_model.inputs:
             shapes[input_layer] = input_layer.partial_shape
             shapes[input_layer][0] = 1
@@ -398,7 +398,7 @@ class TTS(nn.Module):
 
         ov_model_path = Path(f"{ov_path}/tts_{language}.xml")
         ov.save_model(ov_model, Path(ov_model_path))
-        
+
         if self.use_int8:
             calibration_data = self.prepare_dataset(example_input=example_input)
             calibration_dataset = nncf.Dataset(calibration_data)
@@ -415,7 +415,7 @@ class TTS(nn.Module):
 
     def ov_model_init(self, ov_path=None, language = "ZH"):
         self.bert_model.ov_bert_model_init(ov_path, bert_device = self.bert_device, language=language)
-        
+
         self.core = ov.Core()
         if self.use_int8:
             ov_model_path = Path(f"{ov_path}/tts_int8_{language}.xml")
@@ -439,7 +439,7 @@ class TTS(nn.Module):
             inputs_dict['length_scale'] = torch.tensor([1. / speed])
             inputs_dict['noise_scale_w'] = torch.tensor([noise_scale_w])
             inputs_dict['sdp_ratio'] = torch.tensor([sdp_ratio])
-            
+
             self.tts_request.start_async(inputs_dict, share_inputs=True)
             self.tts_request.wait()
             audio = (self.tts_request.get_tensor("audio").data.copy())[0][0]
@@ -475,16 +475,16 @@ class TTS(nn.Module):
                 speakers = torch.LongTensor([speaker_id]).to(device)
 
                 if use_ov:
-                    audio = self.ov_infer(x_tst=x_tst, 
-                                          x_tst_lengths=x_tst_lengths, 
-                                          speakers=speakers, 
-                                          tones=tones, 
-                                          lang_ids=lang_ids, 
-                                          bert=bert, 
-                                          ja_bert=ja_bert, 
-                                          sdp_ratio=sdp_ratio, 
-                                          noise_scale=noise_scale, 
-                                          noise_scale_w=noise_scale_w, 
+                    audio = self.ov_infer(x_tst=x_tst,
+                                          x_tst_lengths=x_tst_lengths,
+                                          speakers=speakers,
+                                          tones=tones,
+                                          lang_ids=lang_ids,
+                                          bert=bert,
+                                          ja_bert=ja_bert,
+                                          sdp_ratio=sdp_ratio,
+                                          noise_scale=noise_scale,
+                                          noise_scale_w=noise_scale_w,
                                           speed=speed)
                 else:
                     audio = self.model(
@@ -501,8 +501,8 @@ class TTS(nn.Module):
                             length_scale=1. / speed,
                         )[0][0, 0].data.cpu().float().numpy()
                 del x_tst, tones, lang_ids, bert, ja_bert, x_tst_lengths, speakers
-                # 
-            audio_list.append(audio)
+                #
+            audio_list.append(utils.fix_loudness(audio,self.hps.data.sampling_rate))
         torch.cuda.empty_cache()
         audio = self.audio_numpy_concat(audio_list, sr=self.hps.data.sampling_rate, speed=speed)
 
