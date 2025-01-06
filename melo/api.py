@@ -50,10 +50,8 @@ class ExportModel(PreTrainedModel):
         }
 
 class Bert():
-    def __init__(self, use_int8=False, device="CPU"):
-        self.use_int8=use_int8
+    def __init__(self, device="CPU"):
         self.device  = device
-
 
     def save_tokenizer(self, tokenizer, out_dir):
         try:
@@ -137,26 +135,6 @@ class Bert():
         ov_model_path = Path(f"{ov_path}/bert_{language}.xml")
         ov.save_model(ov_model, Path(ov_model_path))
 
-        if self.use_int8:
-            calibration_data = self.prepare_dataset(example_input=example_input)
-            calibration_dataset = nncf.Dataset(calibration_data)
-            # quantized_model = nncf.quantize(
-            #     model=ov_model,
-            #     calibration_dataset=calibration_dataset,
-            #     preset=nncf.QuantizationPreset.MIXED,
-            #     # subset_size=len(calibration_data),
-            #     )
-            quantized_model = nncf.quantize(
-                model=ov_model,
-                calibration_dataset=calibration_dataset,
-                model_type=nncf.ModelType.TRANSFORMER,
-                subset_size=len(calibration_data),
-                # Smooth Quant algorithm reduces activation quantization error; optimal alpha value was obtained through grid search
-                advanced_parameters=nncf.AdvancedQuantizationParameters(smooth_quant_alpha=0.6)
-            )
-
-            ov.save_model(quantized_model, Path(f"{ov_path}/bert_int8_{language}.xml"))
-
     def ov_bert_model_init(self, ov_path=None, bert_device = "CPU", language = "ZH"):
         language = "multilingual"
         ov_model_path = Path(f"{ov_path}/bert_{language}.xml")
@@ -178,43 +156,39 @@ class Bert():
         inputs_dict['token_type_ids'] = token_type_ids
         inputs_dict['attention_mask'] = attention_mask
 
-        """
-        Reshape model to static:
-        If using device NPU (on Meteor Lake) to run the BERT model, it is necessary
-        to reshape the model to a static size and pad the input accordingly.
-        """
-        def pad_tensor(input_tensor, pad_length=32):
-            pad_size = pad_length - input_tensor.shape[1]
-            if pad_size > 0:
-                # Pad with zeros on the right side using torch.nn.functional.pad
-                return torch.nn.functional.pad(input_tensor, (0, pad_size), 'constant', 0)
-            elif pad_size < 0:
-                # Truncate the input tensor to the specified pad_length
-                return input_tensor[:, :pad_length]
-            else:
-                return input_tensor
-        if self.device == "NPU":
-            padded_inputs = {}
-            for key, value in inputs_dict.items():
-                padded_inputs[key] = pad_tensor(value)
-
-
         self.bert_request.start_async(padded_inputs if self.device=="NPU" else inputs_dict , share_inputs=True)
         self.bert_request.wait()
         bert_output = self.bert_request.get_output_tensor(0).data.copy()
 
         return bert_output
+
 class TTS(nn.Module):
-    def __init__(self,
+    def __init__(self, torch_device="cpu", bert_device="CPU", tts_device="CPU"):
+        super().__init__()
+        self.core = ov.Core()
+        self.device = torch_device
+        self.bert_device = "CPU"
+        self.tts_device = tts_device
+        self.bert_model = Bert(device = self.bert_device)
+
+    def ov_model_init(self, ov_path=None, hps_config_path=None, language = "ZH"):
+        hps = load_or_download_config(language, use_hf=False, config_path=f"{hps_config_path}/{language}/config.json")
+        self.symbol_to_id = {s: i for i, s in enumerate(hps.symbols)}
+        self.hps = hps
+        self.language = 'ZH_MIX_EN' if language == 'ZH' else language # we support a ZH_MIX_EN model
+
+        ov_model_path = Path(f"{ov_path}/tts_{language}.xml")
+        print(f"ov_path : {ov_model_path}")
+        self.tts_model = self.core.read_model(Path(ov_model_path))
+        self.tts_compiled_model = self.core.compile_model(self.tts_model, self.tts_device)
+        self.tts_request = [self.tts_compiled_model.create_infer_request() for i in range(0, use_threads)]
+
+    def torch_model_init(self,
                 language,
                 torch_device = 'cpu',
-                tts_device='CPU',
-                bert_device = 'CPU',
                 use_hf=True,
-                use_int8=False,
                 config_path=None,
                 ckpt_path=None):
-        super().__init__()
         if torch_device == 'auto':
             torch_device = 'cpu'
             if torch.cuda.is_available(): torch_device = 'cuda'
@@ -222,9 +196,7 @@ class TTS(nn.Module):
         if 'cuda' in torch_device:
             assert torch.cuda.is_available()
 
-        # config_path =
-        hps = load_or_download_config(language, use_hf=use_hf, config_path=config_path)
-
+        hps = load_or_download_config(language, use_hf=use_hf)
         num_languages = hps.num_languages
         num_tones = hps.num_tones
         symbols = hps.symbols
@@ -253,16 +225,6 @@ class TTS(nn.Module):
         self.language = 'ZH_MIX_EN' if language == 'ZH' else language # we support a ZH_MIX_EN model
         if self.language == "EN":
             nltk.download('averaged_perceptron_tagger_eng')
-
-         # ov device
-        self.tts_device = tts_device
-        self.bert_device = bert_device
-
-        self.bert_model = Bert(use_int8=use_int8, device = self.bert_device)
-        self.use_int8 =use_int8
-
-
-
 
     @staticmethod
     def audio_numpy_concat(segment_data_list, sr, speed=1.):
@@ -391,31 +353,6 @@ class TTS(nn.Module):
         ov_model_path = Path(f"{ov_path}/tts_{language}.xml")
         ov.save_model(ov_model, Path(ov_model_path))
 
-        if self.use_int8:
-            calibration_data = self.prepare_dataset(example_input=example_input)
-            calibration_dataset = nncf.Dataset(calibration_data)
-            quantized_model = nncf.quantize(
-                model=ov_model,
-                calibration_dataset=calibration_dataset,
-                model_type=nncf.ModelType.TRANSFORMER,
-                subset_size=len(calibration_data),
-                # Smooth Quant algorithm reduces activation quantization error; optimal alpha value was obtained through grid search
-                advanced_parameters=nncf.AdvancedQuantizationParameters(smooth_quant_alpha=0.6)
-            )
-
-            ov.save_model(quantized_model, Path(f"{ov_path}/tts_int8_{language}.xml"))
-
-    def ov_model_init(self, ov_path=None, language = "ZH"):
-        self.core = ov.Core()
-        if self.use_int8:
-            ov_model_path = Path(f"{ov_path}/tts_int8_{language}.xml")
-        else:
-            ov_model_path = Path(f"{ov_path}/tts_{language}.xml")
-        print(f"ov_path : {ov_model_path}")
-        self.tts_model = self.core.read_model(Path(ov_model_path))
-        self.tts_compiled_model = self.core.compile_model(self.tts_model, self.tts_device)
-        self.tts_request = [self.tts_compiled_model.create_infer_request() for i in range(0, use_threads)]
-
     def ov_infer(self, x_tst=None, x_tst_lengths=None, speakers=None, tones=None, lang_ids=None, bert=None, ja_bert=None, sdp_ratio=0.2, noise_scale=0.6, noise_scale_w=0.8, speed=1.0, index=0):
             inputs_dict = {}
             inputs_dict['phones'] = x_tst
@@ -470,8 +407,7 @@ class TTS(nn.Module):
                 del phones
                 speakers = torch.LongTensor([speaker_id]).to(device)
 
-                if use_ov:
-                    audioDone = self.ov_infer(x_tst=x_tst,
+                audioDone = self.ov_infer(x_tst=x_tst,
                                           x_tst_lengths=x_tst_lengths,
                                           speakers=speakers,
                                           tones=tones,
@@ -483,23 +419,8 @@ class TTS(nn.Module):
                                           noise_scale_w=noise_scale_w,
                                           speed=speed,
                                           index=index)
-                    doneCallbacks.append(audioDone)
-                else:
-                    audio = self.model(
-                            x_tst,
-                            x_tst_lengths,
-                            speakers,
-                            tones,
-                            lang_ids,
-                            bert,
-                            ja_bert,
-                            sdp_ratio=sdp_ratio,
-                            noise_scale=noise_scale,
-                            noise_scale_w=noise_scale_w,
-                            length_scale=1. / speed,
-                        )[0][0, 0].data.cpu().float().numpy()
+                doneCallbacks.append(audioDone)
                 del x_tst, tones, lang_ids, bert, ja_bert, x_tst_lengths, speakers
-                #
 
             if len(doneCallbacks) == use_threads or idx == (len(tx)-1):
                 for done in doneCallbacks:

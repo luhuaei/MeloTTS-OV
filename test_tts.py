@@ -7,7 +7,6 @@ speed = 1.0
 
 
 use_ov = True  ## Used to control whether to use torch or openvino
-use_int8 = False
 speech_enhance = True
 lang = "ZH" # or ZH
 
@@ -59,44 +58,38 @@ text = '''知名爆料人 Moore’s Law is Dead 在近期的视频中表示，Pl
 
 Everthing 正是当之无愧的 Windows 强悍文件搜索「神器」！没有之一！它能在闪电般瞬间从海量的硬盘中找到你需要的文件！速度快到难以置信！首次接触到 Everything 可真让我惊讶和兴奋了许久！而且它还是一款完全免费的软件，界面简洁高效，体积很小巧，但功能却非常丰富……'''
 
-model = TTS(language=lang, tts_device=args.tts_device, bert_device=args.bert_device, use_int8=use_int8)
-speaker_ids = model.hps.data.spk2id
-
-speakers = list(speaker_ids.keys())
+model = TTS()
 
 
 dur_time_list = []
 loop_num = 1
 
+hps_config_path = "ov_models/hps/"
 if use_ov:
-    bert_path = f"bert_multilingual"
+    bert_path = f"ov_models/bert_multilingual"
 
     if not Path(bert_path).exists():
         model.bert_model.bert_convert_to_ov(bert_path, "multilingual")
 
-    ov_path = f"tts_ov_{lang}"
+    ov_path = f"ov_models/tts_ov_{lang}"
     if not Path(ov_path).exists():
+        model.torch_model_init(language=lang)
         model.tts_convert_to_ov(ov_path, language= lang)
 
     model.bert_model.ov_bert_model_init(bert_path, bert_device = "CPU", language="multilingual")
-    model.ov_model_init(ov_path, language = lang)
+    model.ov_model_init(ov_path, hps_config_path, language = lang)
 
+speaker_ids = model.hps.data.spk2id
+speakers = list(speaker_ids.keys())
 for i in range(loop_num):
-    if not use_ov:
-         for speaker in speakers:
-            output_path = 'en_pth_{}.wav'.format(str(speaker))
-            start = time.perf_counter()
-            model.tts_to_file(text, speaker_ids[speaker], output_path, speed=speed, use_ov = use_ov)
-            end = time.perf_counter()
-    else:
-        for speaker in speakers:
-            output_path = 'ov_en_int8_{}.wav'.format(speaker) if use_int8 else 'en_ov_{}.wav'.format(speaker)
-            start = time.perf_counter()
-            model.tts_to_file(text, speaker_ids[speaker], output_path, speed=speed, use_ov=use_ov)
-            if speech_enhance:
-                print("Use speech enhance")
-                process_audio(output_path,output_path)
-            end = time.perf_counter()
+    for speaker in speakers:
+        output_path = '{}_ov_{}.wav'.format(lang, speaker)
+        start = time.perf_counter()
+        model.tts_to_file(text, speaker_ids[speaker], output_path, speed=speed, use_ov=use_ov)
+        if speech_enhance:
+            print("Use speech enhance")
+            process_audio(output_path,output_path)
+        end = time.perf_counter()
 
     dur_time = (end - start) * 1000
     dur_time_list.append(dur_time)
