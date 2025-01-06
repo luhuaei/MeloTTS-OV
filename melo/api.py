@@ -16,7 +16,11 @@ from .models import SynthesizerTrn
 from .split_utils import split_sentence
 from .mel_processing import spectrogram_torch, spectrogram_torch_conv
 from .download_utils import load_or_download_config, load_or_download_model
+
 import openvino as ov
+import openvino.properties.hint as hints
+import openvino.runtime.properties as props
+
 from pathlib import Path
 from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoConfig, PreTrainedModel
 from transformers.onnx import FeaturesManager
@@ -27,6 +31,11 @@ import nncf
 import nltk
 
 use_threads = 8
+ov_config = {
+    props.inference_num_threads(): 8,
+    hints.enable_hyper_threading(): True,
+    hints.performance_mode: hints.PerformanceMode.THROUGHPUT,
+}
 
 class ExportModel(PreTrainedModel):
     def __init__(self, base_model, config):
@@ -142,7 +151,7 @@ class Bert():
 
         core = ov.Core()
         self.bert_model = core.read_model(Path(ov_model_path))
-        self.bert_compiled_model = core.compile_model(self.bert_model, bert_device)
+        self.bert_compiled_model = core.compile_model(self.bert_model, bert_device, ov_config)
         self.bert_request = self.bert_compiled_model.create_infer_request()
 
         self.bert_tokenizer = AutoTokenizer.from_pretrained(ov_path, trust_remote_code=True)
@@ -167,7 +176,7 @@ class TTS(nn.Module):
         super().__init__()
         self.core = ov.Core()
         self.device = torch_device
-        self.bert_device = "CPU"
+        self.bert_device = bert_device
         self.tts_device = tts_device
         self.bert_model = Bert(device = self.bert_device)
 
@@ -180,8 +189,8 @@ class TTS(nn.Module):
         ov_model_path = Path(f"{ov_path}/tts_{language}.xml")
         print(f"ov_path : {ov_model_path}")
         self.tts_model = self.core.read_model(Path(ov_model_path))
-        self.tts_compiled_model = self.core.compile_model(self.tts_model, self.tts_device)
-        self.tts_request = [self.tts_compiled_model.create_infer_request() for i in range(0, use_threads)]
+        self.tts_compiled_model = self.core.compile_model(self.tts_model, self.tts_device, ov_config)
+        self.tts_infer_queue = ov.AsyncInferQueue(self.tts_compiled_model, use_threads)
 
     def torch_model_init(self,
                 language,
@@ -353,7 +362,7 @@ class TTS(nn.Module):
         ov_model_path = Path(f"{ov_path}/tts_{language}.xml")
         ov.save_model(ov_model, Path(ov_model_path))
 
-    def ov_infer(self, x_tst=None, x_tst_lengths=None, speakers=None, tones=None, lang_ids=None, bert=None, ja_bert=None, sdp_ratio=0.2, noise_scale=0.6, noise_scale_w=0.8, speed=1.0, index=0):
+    def ov_infer(self, x_tst=None, x_tst_lengths=None, speakers=None, tones=None, lang_ids=None, bert=None, ja_bert=None, sdp_ratio=0.2, noise_scale=0.6, noise_scale_w=0.8, speed=1.0, audio_index=0):
             inputs_dict = {}
             inputs_dict['phones'] = x_tst
             inputs_dict['phones_length'] = x_tst_lengths
@@ -366,19 +375,11 @@ class TTS(nn.Module):
             inputs_dict['length_scale'] = torch.tensor([1. / speed])
             inputs_dict['noise_scale_w'] = torch.tensor([noise_scale_w])
             inputs_dict['sdp_ratio'] = torch.tensor([sdp_ratio])
-
-            self.tts_request[index].start_async(inputs_dict, share_inputs=True)
-
-            def done():
-                self.tts_request[index].wait()
-                return (self.tts_request[index].get_tensor("audio").data.copy())[0][0]
-
-            return done
+            self.tts_infer_queue.start_async(inputs_dict, audio_index)
 
     def tts_to_file(self, text, speaker_id, output_path=None, sdp_ratio=0.2, noise_scale=0.6, noise_scale_w=0.8, speed=1.0, pbar=None, format=None, position=None, quiet=False, use_ov=True):
         language = self.language
         texts = self.split_sentences_into_pieces(text, language, quiet)
-        audio_list = []
         if pbar:
             tx = pbar(texts)
         else:
@@ -389,10 +390,14 @@ class TTS(nn.Module):
             else:
                 tx = tqdm(texts)
 
-        doneCallbacks = []
-        for idx, t in enumerate(tx):
-            index = idx % use_threads
+        audio_list = [None] * len(texts)
+        def callback(request, audio_index):
+            print('audio_index:', audio_index)
+            audio = (request.get_tensor("audio").data.copy())[0][0]
+            audio_list[audio_index] = utils.fix_loudness(audio, self.hps.data.sampling_rate)
+        self.tts_infer_queue.set_callback(callback)
 
+        for audio_index, t in enumerate(tx):
             if language in ['EN', 'ZH_MIX_EN']:
                 t = re.sub(r'([a-z])([A-Z])', r'\1 \2', t)
             device = self.device
@@ -407,7 +412,7 @@ class TTS(nn.Module):
                 del phones
                 speakers = torch.LongTensor([speaker_id]).to(device)
 
-                audioDone = self.ov_infer(x_tst=x_tst,
+                self.ov_infer(x_tst=x_tst,
                                           x_tst_lengths=x_tst_lengths,
                                           speakers=speakers,
                                           tones=tones,
@@ -418,15 +423,10 @@ class TTS(nn.Module):
                                           noise_scale=noise_scale,
                                           noise_scale_w=noise_scale_w,
                                           speed=speed,
-                                          index=index)
-                doneCallbacks.append(audioDone)
+                                          audio_index=audio_index)
                 del x_tst, tones, lang_ids, bert, ja_bert, x_tst_lengths, speakers
 
-            if len(doneCallbacks) == use_threads or idx == (len(tx)-1):
-                for done in doneCallbacks:
-                    audio = done()
-                    audio_list.append(utils.fix_loudness(audio,self.hps.data.sampling_rate))
-                    doneCallbacks = []
+        self.tts_infer_queue.wait_all()
         torch.cuda.empty_cache()
         audio = self.audio_numpy_concat(audio_list, sr=self.hps.data.sampling_rate, speed=speed)
 

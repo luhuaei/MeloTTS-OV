@@ -58,7 +58,7 @@ text = '''知名爆料人 Moore’s Law is Dead 在近期的视频中表示，Pl
 
 Everthing 正是当之无愧的 Windows 强悍文件搜索「神器」！没有之一！它能在闪电般瞬间从海量的硬盘中找到你需要的文件！速度快到难以置信！首次接触到 Everything 可真让我惊讶和兴奋了许久！而且它还是一款完全免费的软件，界面简洁高效，体积很小巧，但功能却非常丰富……'''
 
-model = TTS()
+model = TTS(torch_device="cpu", tts_device=tts_device, bert_device=bert_device)
 
 
 dur_time_list = []
