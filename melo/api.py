@@ -454,7 +454,7 @@ class TTS(nn.Module):
 
         doneCallbacks = []
         for idx, t in enumerate(tx):
-            idx = idx % use_threads
+            index = idx % use_threads
 
             if language in ['EN', 'ZH_MIX_EN']:
                 t = re.sub(r'([a-z])([A-Z])', r'\1 \2', t)
@@ -482,7 +482,7 @@ class TTS(nn.Module):
                                           noise_scale=noise_scale,
                                           noise_scale_w=noise_scale_w,
                                           speed=speed,
-                                          index=idx)
+                                          index=index)
                     doneCallbacks.append(audioDone)
                 else:
                     audio = self.model(
