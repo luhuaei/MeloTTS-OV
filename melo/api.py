@@ -95,13 +95,11 @@ class Bert():
         calibration_data = self.prepare_calibration_data(dataloader, opt_init_steps)
         return calibration_data
 
-    def bert_convert_to_ov(self, ov_path, language = "ZH"):
-        if "ZH" in language:
-            model_id='bert-base-multilingual-uncased'
-            text = "当需要把翻译对象表示, 可以使用这个方法。"
-        elif "EN" in language:
-            model_id='bert-base-uncased'
-            text = "A buffer is a container for data that can be accessed from a device and the host."
+    def bert_convert_to_ov(self, ov_path, language = "multilingual"):
+        language = "multilingual"
+        model_id='bert-base-multilingual-uncased'
+        text = "当需要把翻译对象表示, 可以使用这个方法。A buffer is a container for data that can be accessed from a device and the host."
+
         models = AutoModelForMaskedLM.from_pretrained(model_id)
         tokenizers = AutoTokenizer.from_pretrained(model_id)
         config = AutoConfig.from_pretrained(model_id)
@@ -160,22 +158,18 @@ class Bert():
             ov.save_model(quantized_model, Path(f"{ov_path}/bert_int8_{language}.xml"))
 
     def ov_bert_model_init(self, ov_path=None, bert_device = "CPU", language = "ZH"):
+        language = "multilingual"
+        ov_model_path = Path(f"{ov_path}/bert_{language}.xml")
+        print(f"init {ov_model_path}")
+
         core = ov.Core()
-        if bert_device != "NPU":
-            if self.use_int8:
-                ov_model_path = Path(f"{ov_path}/bert_int8_{language}.xml")
-            else:
-                ov_model_path = Path(f"{ov_path}/bert_{language}.xml")
-        # NPU must specify static model
-        if bert_device == "NPU" and self.use_int8:
-            ov_model_path = Path(f"{ov_path}/bert_int8_static_{language}.xml")
         self.bert_model = core.read_model(Path(ov_model_path))
         self.bert_compiled_model = core.compile_model(self.bert_model, bert_device)
         self.bert_request = self.bert_compiled_model.create_infer_request()
 
         self.bert_tokenizer = AutoTokenizer.from_pretrained(ov_path, trust_remote_code=True)
         self.bert_config = AutoConfig.from_pretrained(ov_path, trust_remote_code=True)
-        print(f"init {ov_model_path}")
+        print(f"init {ov_model_path} done!")
 
 
     def ov_bert_infer(self, input_ids=None, token_type_ids=None, attention_mask=None):
@@ -337,10 +331,6 @@ class TTS(nn.Module):
         return calibration_data
 
     def tts_convert_to_ov(self, ov_path, language = "ZH", sdp_ratio=0.2, noise_scale=0.6, noise_scale_w=0.8, speed=1.0,):
-        self.bert_model.bert_convert_to_ov(ov_path, language)
-
-
-
         x_tst = torch.tensor([[  0,   0,   0,  97,   0,  65,   0, 100,   0,  89,   0,  55,   0,  49,
            0, 100,   0,  13,   0,  98,   0,  95,   0,  98,   0,  40,   0,  60,
            0,  12,   0,  77,   0,  54,   0,  62,   0,  59,   0,  32,   0,  62,
@@ -416,8 +406,6 @@ class TTS(nn.Module):
             ov.save_model(quantized_model, Path(f"{ov_path}/tts_int8_{language}.xml"))
 
     def ov_model_init(self, ov_path=None, language = "ZH"):
-        self.bert_model.ov_bert_model_init(ov_path, bert_device = self.bert_device, language=language)
-
         self.core = ov.Core()
         if self.use_int8:
             ov_model_path = Path(f"{ov_path}/tts_int8_{language}.xml")
