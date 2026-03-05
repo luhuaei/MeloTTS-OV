@@ -1,21 +1,28 @@
 import pickle
 import os
 import re
-from g2p_en import G2p
+from typing import Optional
 
 from . import symbols
 
 from .english_utils.abbreviations import expand_abbreviations
 from .english_utils.time_norm import expand_time_english
 from .english_utils.number_norm import normalize_numbers
-from .japanese import distribute_phone
-
 from transformers import AutoTokenizer
 
 current_file_path = os.path.dirname(__file__)
 CMU_DICT_PATH = os.path.join(current_file_path, "cmudict.rep")
 CACHE_PATH = os.path.join(current_file_path, "cmudict_cache.pickle")
-_g2p = G2p()
+
+_g2p: Optional[object] = None
+_g2p_import_error: Optional[Exception] = None
+try:
+    from g2p_en import G2p
+
+    _g2p = G2p()
+except Exception as e:
+    # In some environments Python is built without sqlite3, which breaks NLTK import chain.
+    _g2p_import_error = e
 
 arpa = {
     "AH0",
@@ -187,6 +194,32 @@ def text_normalize(text):
 
 model_id = 'bert-base-uncased'
 tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+
+def distribute_phone(n_phone, n_word):
+    phones_per_word = [0] * n_word
+    for _ in range(n_phone):
+        min_tasks = min(phones_per_word)
+        min_index = phones_per_word.index(min_tasks)
+        phones_per_word[min_index] += 1
+    return phones_per_word
+
+
+def _fallback_token_g2p(token: str):
+    token = token.lower().strip()
+    token = re.sub(r"[^a-z]", "", token)
+    phones = []
+    tones = []
+    for ch in token:
+        ph = post_replace_ph(ch)
+        phones.append(ph)
+        tones.append(0)
+    if not phones:
+        phones = ["UNK"]
+        tones = [0]
+    return phones, tones
+
+
 def g2p_old(text):
     tokenized = tokenizer.tokenize(text)
     # import pdb; pdb.set_trace()
@@ -199,15 +232,20 @@ def g2p_old(text):
             phones += phns
             tones += tns
         else:
-            phone_list = list(filter(lambda p: p != " ", _g2p(w)))
-            for ph in phone_list:
-                if ph in arpa:
-                    ph, tn = refine_ph(ph)
-                    phones.append(ph)
-                    tones.append(tn)
-                else:
-                    phones.append(ph)
-                    tones.append(0)
+            if _g2p is not None:
+                phone_list = list(filter(lambda p: p != " ", _g2p(w)))
+                for ph in phone_list:
+                    if ph in arpa:
+                        ph, tn = refine_ph(ph)
+                        phones.append(ph)
+                        tones.append(tn)
+                    else:
+                        phones.append(ph)
+                        tones.append(0)
+            else:
+                phns, tns = _fallback_token_g2p(w)
+                phones += phns
+                tones += tns
     # todo: implement word2ph
     word2ph = [1 for i in phones]
 
@@ -239,16 +277,22 @@ def g2p(text, pad_start_end=True, tokenized=None):
             tones += tns
             phone_len += len(phns)
         else:
-            phone_list = list(filter(lambda p: p != " ", _g2p(w)))
-            for ph in phone_list:
-                if ph in arpa:
-                    ph, tn = refine_ph(ph)
-                    phones.append(ph)
-                    tones.append(tn)
-                else:
-                    phones.append(ph)
-                    tones.append(0)
-                phone_len += 1
+            if _g2p is not None:
+                phone_list = list(filter(lambda p: p != " ", _g2p(w)))
+                for ph in phone_list:
+                    if ph in arpa:
+                        ph, tn = refine_ph(ph)
+                        phones.append(ph)
+                        tones.append(tn)
+                    else:
+                        phones.append(ph)
+                        tones.append(0)
+                    phone_len += 1
+            else:
+                phns, tns = _fallback_token_g2p(w)
+                phones += phns
+                tones += tns
+                phone_len += len(phns)
         aaa = distribute_phone(phone_len, word_len)
         word2ph += aaa
     phones = [post_replace_ph(i) for i in phones]

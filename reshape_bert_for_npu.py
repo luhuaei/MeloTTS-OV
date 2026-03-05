@@ -1,74 +1,49 @@
-from melo.api import TTS
-from pathlib import Path
-from openvino.runtime import Core
-from openvino import Type
-import openvino as ov
-import time
+import argparse
+
+import numpy as np
+import onnxruntime as ort
 from transformers import AutoTokenizer
-import torch
-
-device = 'NPU' 
-language = 'EN'
-ov_path = f"tts_ov_{language}"
-ov_model_path = Path(f"{ov_path}/bert_int8_{language}.xml")
-ov_model_save_path = Path(f"{ov_path}/bert_int8_static_{language}.xml")
-bert_static_shape = [1,32]
-def reshape_for_npu(model, bert_static_shape):
-        # change dynamic shape to static shape
-        shapes = dict()
-        for input_layer  in model.inputs:
-            shapes[input_layer] = bert_static_shape
-        model.reshape(shapes)
-        ov.save_model(model, Path(ov_model_save_path))
-        print(f"save static model in {Path(ov_model_save_path)}")
 
 
-def pad_input(input_dict, pad_length=32):
-    def pad_tensor(input_tensor, pad_length):      
-        pad_size = pad_length - input_tensor.shape[1]
-        if pad_size > 0:
-            # Pad with zeros on the right side using torch.nn.functional.pad
-            return torch.nn.functional.pad(input_tensor, (0, pad_size), 'constant', 0)
-        elif pad_size < 0:
-            # Truncate the input tensor to the specified pad_length
-            return input_tensor[:, :pad_length]
-        else:
-            return input_tensor
-    
-    padded_inputs = {}
-    for key, value in input_dict.items():
-        padded_inputs[key] = pad_tensor(value, pad_length)
-    return padded_inputs
+def pad_to_fixed_len(input_ids: np.ndarray, fixed_len: int) -> np.ndarray:
+    if input_ids.shape[1] == fixed_len:
+        return input_ids
+    if input_ids.shape[1] > fixed_len:
+        return input_ids[:, :fixed_len]
 
-def test_static_shape(compiled_model,device="NPU"):
-    if "ZH" in language:
-            model_id='bert-base-multilingual-uncased'
-            text = "buffer是一个数据容器，可以从device和host访问。"
-    elif "EN" in language:
-            model_id='bert-base-uncased'
-            text = "A buffer is a container for data that can be accessed from a device and the host."
-    tokenizers = AutoTokenizer.from_pretrained(model_id)
-    inputs = tokenizers(text, return_tensors="pt")
-    padded_inputs = pad_input(inputs,pad_length=bert_static_shape[1])
-   
-    infer_request = compiled_model.create_infer_request()
-
-    infer_request.infer(padded_inputs)
-    res =  infer_request.get_tensor("hidden_states").data.copy()
-    print("Test Passed!")
-    pass
+    out = np.zeros((input_ids.shape[0], fixed_len), dtype=input_ids.dtype)
+    out[:, : input_ids.shape[1]] = input_ids
+    return out
 
 
 def main():
-    core = Core()
-    model = core.read_model(ov_model_path)
-    reshape_for_npu(model, bert_static_shape=bert_static_shape)
-    compiled_model = core.compile_model(ov_model_save_path,device)
-    test_static_shape(compiled_model, device=device)
-    
-    
+    parser = argparse.ArgumentParser(description="Validate fixed-length BERT ONNX input for edge devices")
+    parser.add_argument("--model", type=str, required=True, help="BERT ONNX model path")
+    parser.add_argument("--tokenizer", type=str, default="bert-base-multilingual-uncased", help="Tokenizer id/path")
+    parser.add_argument("--seq_len", type=int, default=32, help="Fixed sequence length")
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="ONNX Runtime provider")
+    args = parser.parse_args()
+
+    providers = ["CPUExecutionProvider"]
+    if args.device in {"auto", "cuda"} and "CUDAExecutionProvider" in ort.get_available_providers():
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+    session = ort.InferenceSession(args.model, providers=providers)
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+
+    text = "A buffer is a container for data that can be accessed from a device and the host."
+    encoded = tokenizer(text, return_tensors="np")
+
+    feed = {
+        "input_ids": pad_to_fixed_len(encoded["input_ids"], args.seq_len).astype(np.int64),
+        "token_type_ids": pad_to_fixed_len(encoded["token_type_ids"], args.seq_len).astype(np.int64),
+        "attention_mask": pad_to_fixed_len(encoded["attention_mask"], args.seq_len).astype(np.int64),
+    }
+
+    output_name = session.get_outputs()[0].name
+    output = session.run([output_name], feed)[0]
+    print(f"Inference succeeded. output shape: {output.shape}")
+
+
 if __name__ == "__main__":
     main()
-
-
-

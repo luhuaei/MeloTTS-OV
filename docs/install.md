@@ -13,8 +13,8 @@ The repo is developed and tested on `Ubuntu 20.04` and `Python 3.9`.
 ```bash
 git clone https://github.com/myshell-ai/MeloTTS.git
 cd MeloTTS
-pip install -e .
-python -m unidic download
+uv sync
+uv run python -m unidic download
 ```
 If you encountered issues in macOS install, try the [Docker Install](#docker-install)
 

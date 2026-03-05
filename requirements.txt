@@ -1,6 +1,8 @@
 txtsplit
 torch
 torchaudio
+onnx>=1.16.0
+onnxruntime==1.20.1
 transformers==4.27.4
 num2words==0.5.12
 unidic_lite==1.0.8
@@ -14,6 +16,7 @@ jamo==0.4.1
 gruut[de,es,fr]==2.2.3
 g2pkk>=0.1.1
 librosa==0.9.1
+pyloudnorm
 pydub==0.25.1
 eng_to_ipa==0.0.2
 inflect==7.0.0
