@@ -1,0 +1,39 @@
+ARG BASE_IMAGE=registry.lazycat.cloud/x/lzc-aipod-onnx:5da656e
+FROM ${BASE_IMAGE}
+
+ARG MELOTTS=0.1.2
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG ALL_PROXY
+ARG NO_PROXY
+
+WORKDIR /app
+
+ENV HTTP_PROXY=${HTTP_PROXY} \
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    ALL_PROXY=${ALL_PROXY} \
+    NO_PROXY=${NO_PROXY} \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    MELO_ONNX_DIR=/app/onnx_models \
+    MELO_AUTO_EXPORT_ONNX=0 \
+    MELO_TORCH_DEVICE=cuda \
+    MELO_TTS_DEVICE=cuda \
+    MELO_BERT_DEVICE=cuda \
+    MELO_WORKERS=4
+
+LABEL org.opencontainers.image.title="MeloTTS-OV Jetson" \
+      org.opencontainers.image.version="${MELOTTS}"
+
+# Copy source code and model files from local workspace.
+COPY . /app
+
+RUN set -eux; \
+    grep -Ev '^(torch|torchaudio|onnx([[:alnum:]_+-]*)?)([<>=!~].*)?$' requirements.txt > /tmp/requirements.jetson.txt; \
+    uv pip install --system --no-cache-dir -r /tmp/requirements.jetson.txt; \
+    uv pip install --system --no-cache-dir --no-deps -e /app
+
+EXPOSE 8000
+
+CMD ["python", "-m", "melo.openai_speech_server", "--host", "0.0.0.0", "--port", "8000"]
