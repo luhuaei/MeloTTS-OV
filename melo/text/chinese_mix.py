@@ -97,7 +97,23 @@ def _get_initials_finals(word):
     return initials, finals
 
 model_id = 'bert-base-multilingual-uncased'
-tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+
+def _load_tokenizer():
+    local_dir = os.getenv("MELO_ZH_MIX_TOKENIZER_DIR") or os.getenv("MELO_EN_TOKENIZER_DIR")
+    if local_dir:
+        try:
+            return AutoTokenizer.from_pretrained(local_dir, local_files_only=True)
+        except Exception:
+            pass
+
+    try:
+        return AutoTokenizer.from_pretrained(model_id, local_files_only=True)
+    except Exception:
+        return AutoTokenizer.from_pretrained(model_id)
+
+
+tokenizer = _load_tokenizer()
 def _g2p(segments):
     phones_list = []
     tones_list = []

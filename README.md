@@ -108,6 +108,54 @@ uv run python test_tts.py --language ZH --torch_device cuda --tts_device cuda --
 - Sentence-level concurrent inference (`--workers N`)
 - Optional ONNX export (`--export_onnx`)
 
+## C++ Binary (ZH_MIX_EN, ONNX, OpenAI-Compatible HTTP)
+
+Build:
+```bash
+cmake -S . -B build-cpp
+cmake --build build-cpp -j
+```
+
+CLI (direct ONNX path):
+```bash
+./build-cpp/melo_cpp_zhmix_en \
+  --onnx onnx_models/tts_onnx_ZH_MIX_EN \
+  --text "你好，This is a C++ inference demo." \
+  --voice ZH_MIX_EN \
+  --response-format wav \
+  --output speech.wav
+```
+
+HTTP service (`/v1/audio/speech`):
+```bash
+./build-cpp/melo_cpp_zhmix_en \
+  --serve \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --onnx onnx_models/tts_onnx_ZH_MIX_EN \
+  --tts-device cuda \
+  --bert-device cuda
+```
+
+Request example:
+```bash
+curl -X POST http://127.0.0.1:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "tts-1",
+    "input": "你好，欢迎使用 MeloTTS C++ 服务",
+    "voice": "ZH_MIX_EN",
+    "response_format": "mp3",
+    "speed": 1.0
+  }' --output speech.mp3
+```
+
+Notes:
+- The C++ binary keeps HTTP/OpenAI-compatible routing and runs a persistent Python worker for text frontend + ONNX inference.
+- `--onnx` supports either a direct model directory (`tts_ZH_MIX_EN.onnx` + `bert_multilingual.onnx`) or a parent ONNX root.
+- The first model load may fetch Melo language config from HuggingFace if it is not already cached locally.
+- If `MELO_API_KEY` is set, `Authorization: Bearer <key>` is required.
+
 ## OpenAI-Compatible Speech API
 Start server:
 ```bash

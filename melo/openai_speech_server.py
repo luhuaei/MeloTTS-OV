@@ -8,6 +8,7 @@ import numpy as np
 import soundfile as sf
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from pydub import AudioSegment
@@ -135,6 +136,12 @@ class MeloSpeechService:
 
 service = MeloSpeechService()
 app = FastAPI(title="MeloTTS OpenAI-Compatible Speech API", version="1.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def _openai_error(message: str, param: Optional[str] = None, status_code: int = 400) -> HTTPException:
