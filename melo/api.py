@@ -294,8 +294,9 @@ class TTS(nn.Module):
             onnx_root = self.onnx_dir / f"tts_onnx_{requested_language}"
             tts_onnx = onnx_root / f"tts_{requested_language}.onnx"
             bert_onnx = onnx_root / "bert_multilingual.onnx"
+            shared_bert_onnx = self.onnx_dir / "shared_bert" / "bert_multilingual.onnx"
 
-            if not (tts_onnx.exists() and bert_onnx.exists()):
+            if not (tts_onnx.exists() and (bert_onnx.exists() or shared_bert_onnx.exists())):
                 if not self.auto_export_onnx:
                     raise FileNotFoundError(
                         f"Missing ONNX files under {onnx_root}. "
@@ -372,10 +373,12 @@ class TTS(nn.Module):
         if self.language == "EN":
             try:
                 import nltk
-
-                nltk.download("averaged_perceptron_tagger_eng", quiet=True)
+                nltk.data.find("taggers/averaged_perceptron_tagger_eng")
             except Exception:
-                pass
+                print(
+                    "Warning: missing NLTK data 'averaged_perceptron_tagger_eng'. "
+                    "Prepare it during image build for offline runtime."
+                )
 
     def tts_convert_to_onnx(
         self,
@@ -499,15 +502,6 @@ class TTS(nn.Module):
         _require_onnxruntime()
         requested_language = language.upper()
         base_language = _normalize_language_for_model(requested_language)
-        if hps_config_path:
-            cfg = f"{hps_config_path}/{base_language}/config.json"
-            hps = load_or_download_config(base_language, use_hf=False, config_path=cfg)
-        else:
-            hps = load_or_download_config(base_language, use_hf=True)
-
-        self.symbol_to_id = {s: i for i, s in enumerate(hps.symbols)}
-        self.hps = hps
-        self.language = requested_language
 
         onnx_root = Path(onnx_path)
         if onnx_root.is_file():
@@ -526,6 +520,16 @@ class TTS(nn.Module):
                     candidate = all_onnx[0]
             tts_model_file = candidate
 
+        if hps_config_path:
+            cfg = f"{hps_config_path}/{base_language}/config.json"
+            hps = load_or_download_config(base_language, use_hf=False, config_path=cfg)
+        else:
+            hps = load_or_download_config(base_language, use_hf=True)
+
+        self.symbol_to_id = {s: i for i, s in enumerate(hps.symbols)}
+        self.hps = hps
+        self.language = requested_language
+
         sess_options = ort.SessionOptions()
         sess_options.intra_op_num_threads = self.num_workers
         sess_options.inter_op_num_threads = 1
@@ -539,10 +543,15 @@ class TTS(nn.Module):
         self.tts_output_name = self.tts_session.get_outputs()[0].name
         self.tts_input_name_map = self._resolve_tts_input_name_map()
 
+        bert_source_dir = onnx_root
         bert_onnx = onnx_root / "bert_multilingual.onnx"
         if not bert_onnx.exists():
-            raise FileNotFoundError(f"Required BERT ONNX file not found: {bert_onnx}")
-        self.bert_model.onnx_bert_model_init(str(onnx_root), providers=bert_providers)
+            shared_dir = onnx_root.parent / "shared_bert"
+            shared_bert_onnx = shared_dir / "bert_multilingual.onnx"
+            if not shared_bert_onnx.exists():
+                raise FileNotFoundError(f"Required BERT ONNX file not found: {bert_onnx} or {shared_bert_onnx}")
+            bert_source_dir = shared_dir
+        self.bert_model.onnx_bert_model_init(str(bert_source_dir), providers=bert_providers)
 
     def onnx_infer(
         self,

@@ -123,7 +123,10 @@ class MeloSpeechService:
 
         # Native speaker names, e.g. EN-US / ZH / JP
         for language in ["EN", "ZH", "JP", "KR", "ES", "FR"]:
-            model = self.get_model(language)
+            try:
+                model = self.get_model(language)
+            except Exception:
+                continue
             if voice in model.hps.data.spk2id:
                 return language, voice
 
@@ -251,6 +254,17 @@ async def healthz():
     return {"status": "ok"}
 
 
+@app.get("/v1/models")
+async def list_models():
+    return {
+        "object": "list",
+        "data": [
+            {"id": "tts-1", "object": "model", "created": 0, "owned_by": "melotts-ov"},
+            {"id": "tts-1-hd", "object": "model", "created": 0, "owned_by": "melotts-ov"},
+        ],
+    }
+
+
 @app.post("/v1/audio/speech")
 def create_speech(payload: SpeechRequest, _: None = Depends(_require_api_key)):
     if not payload.input.strip():
@@ -293,7 +307,8 @@ def main():
     parser.add_argument("--reload", action="store_true")
     args = parser.parse_args()
 
-    uvicorn.run("melo.openai_speech_server:app", host=args.host, port=args.port, reload=args.reload)
+    app_ref = "melo.openai_speech_server:app" if args.reload else app
+    uvicorn.run(app_ref, host=args.host, port=args.port, reload=args.reload)
 
 
 if __name__ == "__main__":

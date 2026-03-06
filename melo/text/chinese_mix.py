@@ -99,6 +99,14 @@ def _get_initials_finals(word):
 model_id = 'bert-base-multilingual-uncased'
 
 
+def _is_offline_mode() -> bool:
+    flags = [
+        os.getenv("HF_HUB_OFFLINE", ""),
+        os.getenv("TRANSFORMERS_OFFLINE", ""),
+    ]
+    return any(str(v).strip().lower() in {"1", "true", "yes", "on"} for v in flags)
+
+
 def _load_tokenizer():
     local_dir = os.getenv("MELO_ZH_MIX_TOKENIZER_DIR") or os.getenv("MELO_EN_TOKENIZER_DIR")
     if local_dir:
@@ -109,7 +117,11 @@ def _load_tokenizer():
 
     try:
         return AutoTokenizer.from_pretrained(model_id, local_files_only=True)
-    except Exception:
+    except Exception as e:
+        if _is_offline_mode():
+            raise RuntimeError(
+                f"Offline mode enabled but tokenizer '{model_id}' not found in local cache."
+            ) from e
         return AutoTokenizer.from_pretrained(model_id)
 
 

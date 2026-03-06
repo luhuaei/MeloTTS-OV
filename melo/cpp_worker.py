@@ -79,7 +79,9 @@ class CppSpeechService:
                     candidate / "tts.onnx",
                 ]
                 has_tts = any(x.exists() for x in tts_candidates)
-                has_bert = (candidate / "bert_multilingual.onnx").exists()
+                has_bert = (candidate / "bert_multilingual.onnx").exists() or (
+                    candidate.parent / "shared_bert" / "bert_multilingual.onnx"
+                ).exists()
                 if has_tts and has_bert:
                     return candidate
 
@@ -95,7 +97,10 @@ class CppSpeechService:
         ]
 
         for candidate in candidates:
-            if candidate.is_dir() and (candidate / "bert_multilingual.onnx").exists():
+            has_bert = (candidate / "bert_multilingual.onnx").exists() or (
+                candidate.parent / "shared_bert" / "bert_multilingual.onnx"
+            ).exists()
+            if candidate.is_dir() and has_bert:
                 return candidate
 
         raise RequestError(

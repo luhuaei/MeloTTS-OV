@@ -162,6 +162,50 @@ Start server:
 uv run melo-openai-speech --host 0.0.0.0 --port 8000
 ```
 
+### Supported Languages / Voice
+
+`voice` supports direct language id:
+
+- `ZH_MIX_EN`
+- `ZH`
+- `EN`
+- `JP`
+- `KR`
+- `ES`
+- `FR`
+
+`voice` also supports OpenAI-style English aliases:
+
+- `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`, `ash`, `ballad`, `coral`, `sage`, `verse`
+
+`voice` also supports explicit `LANG:SPEAKER` format, for example:
+
+- `EN:EN-US`
+- `EN:EN-Default`
+- `ZH:ZH`
+
+Optional extension field `language` can force model language:
+
+```json
+{
+  "language": "ZH"
+}
+```
+
+### API Endpoints
+
+1. `GET /healthz`
+   - Response: `{"status":"ok"}`
+2. `POST /v1/audio/speech`
+   - OpenAI-compatible TTS endpoint
+   - Request fields:
+     - `model` (required, e.g. `tts-1`)
+     - `input` (required)
+     - `voice` (optional, default `alloy`)
+     - `response_format` (optional: `mp3`, `opus`, `aac`, `flac`, `wav`, `pcm`)
+     - `speed` (optional, range `[0.25, 4.0]`)
+     - `language` (optional extension)
+
 Request example:
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/audio/speech \\
@@ -173,4 +217,73 @@ curl -X POST http://127.0.0.1:8000/v1/audio/speech \\
     \"response_format\": \"mp3\",
     \"speed\": 1.0
   }' --output speech.mp3
+```
+
+Chinese voice example:
+```bash
+curl -X POST http://127.0.0.1:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "tts-1",
+    "input": "长时间。肥差",
+    "voice": "ZH",
+    "response_format": "mp3",
+    "speed": 1.0
+  }' --output speech.mp3
+```
+
+## Jetson Image Optimization
+
+`Dockerfile.jetson` has model dedup and language pruning support:
+
+1. Shared BERT/tokenizer copy:
+   - `bert_multilingual.onnx` and tokenizer files are stored once under `/app/onnx_models/shared_bert`.
+   - Each `tts_onnx_<LANG>` directory links to shared files.
+2. Language pruning (reduce image size/startup unpack time):
+   - Build arg `MELO_LANGS` controls included language models.
+   - Default: `EN,ES,FR,JP,KR,ZH,ZH_MIX_EN`
+
+Build only Chinese + English example:
+```bash
+MELO_LANGS=EN,ZH,ZH_MIX_EN make build_jetson
+```
+
+## Jetson E2E Auto Test
+
+Script:
+```bash
+./scripts/jetson_e2e_test.sh
+```
+
+Defaults include:
+
+1. offline mode runtime envs (`OFFLINE_MODE=1`)
+2. basic `/v1/audio/speech` request
+3. extra mixed-language request (`voice=ZH_MIX_EN`) to catch tokenizer offline regressions
+4. voice matrix generation for multiple voices (OpenAI aliases + `ZH_MIX_EN,ZH,EN,JP,KR,ES,FR`)
+5. per-voice ASR transcription comparison when `ASR_VERIFY_URL` is set (`VOICE_MATRIX_ASR_VERIFY=auto` by default)
+6. runtime log scan for offline download errors (`LocalEntryNotFoundError`, `huggingface.co` connect errors)
+7. voice matrix summary output at `logs/.../voice_matrix/summary.txt`
+
+Common quick regression:
+```bash
+SKIP_SYNC=1 SKIP_BUILD=1 ./scripts/jetson_e2e_test.sh
+```
+
+Customize voice matrix:
+```bash
+VOICE_MATRIX_VOICES="alloy,ZH_MIX_EN,ZH,EN" \
+SKIP_SYNC=1 SKIP_BUILD=1 ./scripts/jetson_e2e_test.sh
+```
+
+Enable per-voice ASR matrix verification explicitly:
+```bash
+ASR_VERIFY_URL="https://asr-ai.13gxg.heiyu.space/v1/audio/transcriptions" \
+VOICE_MATRIX_ASR_VERIFY=1 \
+SKIP_SYNC=1 SKIP_BUILD=1 ./scripts/jetson_e2e_test.sh
+```
+
+If you want matrix failures to be warnings only:
+```bash
+VOICE_MATRIX_STRICT=0 SKIP_SYNC=1 SKIP_BUILD=1 ./scripts/jetson_e2e_test.sh
 ```

@@ -1,7 +1,51 @@
 ARG BASE_IMAGE=registry.lazycat.cloud/x/lzc-aipod-onnx:5da656e
+FROM ${BASE_IMAGE} AS onnx_assets
+
+ARG MELO_LANGS=EN,ES,FR,JP,KR,ZH,ZH_MIX_EN
+
+WORKDIR /work
+COPY onnx_models /work/onnx_models
+
+# Pack ONNX assets with a shared multilingual BERT/tokenizer copy.
+RUN set -eux; \
+    src=/work/onnx_models; \
+    dst=/work/onnx_packed; \
+    shared="${dst}/shared_bert"; \
+    mkdir -p "${shared}"; \
+    first_lang="$(printf '%s' "${MELO_LANGS}" | awk -F',' '{gsub(/[[:space:]]/, "", $1); print toupper($1)}')"; \
+    test -n "${first_lang}"; \
+    first_dir="${src}/tts_onnx_${first_lang}"; \
+    test -d "${first_dir}"; \
+    cp "${first_dir}/bert_multilingual.onnx" "${shared}/bert_multilingual.onnx"; \
+    for f in config.json tokenizer.json tokenizer_config.json vocab.txt special_tokens_map.json; do \
+      cp "${first_dir}/${f}" "${shared}/${f}"; \
+    done; \
+    for raw_lang in $(printf '%s' "${MELO_LANGS}" | tr ',' ' '); do \
+      lang="$(printf '%s' "${raw_lang}" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"; \
+      test -n "${lang}"; \
+      in_dir="${src}/tts_onnx_${lang}"; \
+      test -d "${in_dir}"; \
+      out_dir="${dst}/tts_onnx_${lang}"; \
+      mkdir -p "${out_dir}"; \
+      tts_file="${in_dir}/tts_${lang}.onnx"; \
+      if [ ! -f "${tts_file}" ]; then \
+        tts_file="$(find "${in_dir}" -maxdepth 1 -type f -name 'tts_*.onnx' | sort | head -n1)"; \
+      fi; \
+      test -n "${tts_file}" && test -f "${tts_file}"; \
+      cp "${tts_file}" "${out_dir}/"; \
+      ln -s ../shared_bert/bert_multilingual.onnx "${out_dir}/bert_multilingual.onnx"; \
+      ln -s ../shared_bert/config.json "${out_dir}/config.json"; \
+      ln -s ../shared_bert/tokenizer.json "${out_dir}/tokenizer.json"; \
+      ln -s ../shared_bert/tokenizer_config.json "${out_dir}/tokenizer_config.json"; \
+      ln -s ../shared_bert/vocab.txt "${out_dir}/vocab.txt"; \
+      ln -s ../shared_bert/special_tokens_map.json "${out_dir}/special_tokens_map.json"; \
+    done; \
+    du -sh "${dst}"
+
 FROM ${BASE_IMAGE}
 
 ARG MELOTTS=0.1.2
+ARG MELO_LANGS=EN,ES,FR,JP,KR,ZH,ZH_MIX_EN
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG ALL_PROXY
@@ -17,23 +61,104 @@ ENV HTTP_PROXY=${HTTP_PROXY} \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     MELO_ONNX_DIR=/app/onnx_models \
+    MELO_LANGS=${MELO_LANGS} \
     MELO_AUTO_EXPORT_ONNX=0 \
     MELO_TORCH_DEVICE=cuda \
     MELO_TTS_DEVICE=cuda \
     MELO_BERT_DEVICE=cuda \
-    MELO_WORKERS=4
+    MELO_WORKERS=4 \
+    HF_HOME=/root/.cache/huggingface \
+    TRANSFORMERS_CACHE=/root/.cache/huggingface \
+    TOKENIZERS_PARALLELISM=false
 
 LABEL org.opencontainers.image.title="MeloTTS-OV Jetson" \
       org.opencontainers.image.version="${MELOTTS}"
 
-# Copy source code and model files from local workspace.
-COPY . /app
+# 1) Copy packed model assets first for better layer reuse when code changes.
+COPY --from=onnx_assets /work/onnx_packed /app/onnx_models
 
+# Keep requirements separate so we can install deps before copying full source.
+COPY requirements.txt /tmp/requirements.txt
+
+# 2) Install torch stack first.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system triton torchvision torchaudio -i http://wa.lan:10608/simple --trusted-host wa.lan
+
+# 3) Install python requirements (excluding torch/onnx packages handled above).
 RUN set -eux; \
-    grep -Ev '^(torch|torchaudio|onnx([[:alnum:]_+-]*)?)([<>=!~].*)?$' requirements.txt > /tmp/requirements.jetson.txt; \
-    uv pip install --system --no-cache-dir -r /tmp/requirements.jetson.txt; \
-    uv pip install --system --no-cache-dir --no-deps -e /app
+    grep -Ev '^(torch|torchaudio|onnx([[:alnum:]_+-]*)?)([<>=!~].*)?$' /tmp/requirements.txt > /tmp/requirements.jetson.txt; \
+    uv pip install --system --no-cache-dir -r /tmp/requirements.jetson.txt
+
+# KR g2p runtime dependency (python wrapper for MeCab-ko).
+RUN set -eux; \
+    if printf ',%s,' "${MELO_LANGS}" | tr '[:lower:]' '[:upper:]' | grep -q ',KR,'; then \
+      uv pip install --system --no-cache-dir python-mecab-ko python-mecab-ko-dic; \
+    else \
+      echo "skip python-mecab-ko install (KR not selected)"; \
+    fi
+
+# Prefetch NLP/ASR related runtime resources.
+RUN python3 -m nltk.downloader averaged_perceptron_tagger averaged_perceptron_tagger_eng cmudict
+
+# Prefetch unidic dictionary for Japanese tokenizer/phonemizer runtime.
+RUN python3 -m unidic download
+
+# Prefetch tokenizer + Melo hps configs needed by selected languages to avoid runtime downloads.
+RUN python3 - <<'PY'
+import os
+from transformers import AutoTokenizer
+from huggingface_hub import hf_hub_download
+
+lang_to_tokenizers = {
+    "EN": ["bert-base-uncased"],
+    "ZH_MIX_EN": ["bert-base-multilingual-uncased", "bert-base-uncased"],
+    "FR": ["dbmdz/bert-base-french-europeana-cased"],
+    "ES": ["dccuchile/bert-base-spanish-wwm-uncased"],
+    "JP": ["tohoku-nlp/bert-base-japanese-v3"],
+    "KR": ["kykim/bert-kor-base"],
+}
+lang_to_repo = {
+    "EN": "myshell-ai/MeloTTS-English",
+    "ES": "myshell-ai/MeloTTS-Spanish",
+    "FR": "myshell-ai/MeloTTS-French",
+    "JP": "myshell-ai/MeloTTS-Japanese",
+    "KR": "myshell-ai/MeloTTS-Korean",
+    "ZH": "myshell-ai/MeloTTS-Chinese",
+    "ZH_MIX_EN": "myshell-ai/MeloTTS-Chinese",
+}
+langs = [x.strip().upper() for x in os.getenv("MELO_LANGS", "").split(",") if x.strip()]
+if not langs:
+    langs = ["ZH"]
+
+tokenizer_ids = sorted({mid for lang in langs for mid in lang_to_tokenizers.get(lang, [])})
+for mid in tokenizer_ids:
+    AutoTokenizer.from_pretrained(mid)
+    print(f"prefetched tokenizer: {mid}")
+
+repo_ids = sorted({lang_to_repo[lang] for lang in langs if lang in lang_to_repo})
+if "EN" in langs:
+    repo_ids.append("myshell-ai/MeloTTS-English-v2")
+for rid in sorted(set(repo_ids)):
+    hf_hub_download(repo_id=rid, filename="config.json")
+    print(f"prefetched melo hps config: {rid}/config.json")
+PY
+
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_DATASETS_OFFLINE=1 \
+    NLTK_DATA=/root/nltk_data
+
+# 4) Copy runtime source code last (avoid re-copying raw onnx_models into final image).
+COPY melo /app/melo
+COPY scripts /app/scripts
+COPY pyproject.toml /app/pyproject.toml
+COPY setup.py /app/setup.py
+COPY requirements.txt /app/requirements.txt
+COPY README.md /app/README.md
+
+# Install local package after source copy.
+RUN uv pip install --system --no-cache-dir --no-deps -e /app
 
 EXPOSE 8000
 
-CMD ["python", "-m", "melo.openai_speech_server", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python3", "-m", "melo.openai_speech_server", "--host", "0.0.0.0", "--port", "8000"]
